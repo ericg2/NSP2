@@ -1,5 +1,4 @@
 ﻿/**
- *  
  * Copyright (c) 2023 Eric Gold (ericg2)
  *
  * This program is free software: you can redistribute it and/or modify
@@ -16,32 +15,44 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-using Microsoft.VisualBasic;
 using Newtonsoft.Json;
 using NSP2.Client;
 using NSP2.JSON;
 using NSP2.JSON.Message;
 using NSP2.Util;
-using System.Collections;
+using NSP2Lib.JSON;
+using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
-using System.Reflection.Metadata.Ecma335;
 using System.Security.Cryptography;
-using static NSP2.JSON.Message.UpdatePermissionTemplate;
 using static NSP2.JSON.Message.UserReferenceTemplate;
 using static NSP2.JSON.NSP2Request;
 using static NSP2.JSON.NSP2Response;
 using static NSP2.Server.NSP2ServerClient;
-using static NSP2.Server.NSP2ServerClient.PunishmentEventArgs;
+using static NSP2.Server.NSP2ServerClient.ServerPunishmentEventArgs;
 
 namespace NSP2.Server
 {
     public class NSP2Server
     {
+        public class MutableKeyValuePair<K, V>
+        {
+            public K Key { get; set; }
+            public V Value { get; set; }
+
+            public MutableKeyValuePair(K key, V val)
+            {
+                this.Key = key;
+                this.Value = val;
+            }
+        }
+
         [JsonIgnore]
         public static readonly int UNLIMITED = -1;
 
         public int Port { set; get; } = 8080;
+
+        public TimeSpan KeepAliveInterval { set; get; } = TimeSpan.FromSeconds(30);
 
         public int MaxClients { set; get; } = UNLIMITED;
 
@@ -80,7 +91,11 @@ namespace NSP2.Server
         [JsonIgnore]
         public bool IsRunning { set; get; } = false;
 
-        public NSP2PermissionList DefaultPermissions { set; get; } = new NSP2PermissionList();
+        public NSP2PermissionList DefaultPermissions { set; get; } = new NSP2PermissionList()
+        {
+            NSP2Permission.READ,
+            NSP2Permission.WRITE
+        };
 
         public List<NSP2Account> Accounts { set; get; } = new List<NSP2Account>();
 
@@ -97,30 +112,52 @@ namespace NSP2.Server
         }
 
         [JsonIgnore]
-        public List<NSP2ServerClient> Clients { private set; get; } = new List<NSP2ServerClient>();
+        public List<NSP2ServerClient> Clients
+        {
+            get
+            {
+                List<NSP2ServerClient> output = new List<NSP2ServerClient>();
+                lock (_ClientManagerLock)
+                {
+                    foreach (KeyValuePair<NSP2ServerClient, MutableKeyValuePair<Thread, ClientState>> kvp in _ClientManagers)
+                    {
+                        if (kvp.Value.Value == ClientState.CONNECTED)
+                            output.Add(kvp.Key);
+                    }
+                }
+                return output;
+            }
+        }
 
         public event EventHandler<ClientMessageReceivedEventArgs>? OnMessageReceived;
 
-        public event EventHandler<ClientEventArgs>? OnClientConnected;
+        public event EventHandler<ServerClientEventArgs>? OnClientConnected;
 
         public event EventHandler<ClientDisconnectEventArgs>? OnClientDisconnected;
 
-        public event EventHandler<PunishmentEventArgs>? OnPunished;
+        public event EventHandler<ServerPunishmentEventArgs>? OnPunished;
 
-        public event EventHandler<ClientEventArgs>? OnMuteRemoved;
+        public event EventHandler<ServerClientEventArgs>? OnMuteRemoved;
+
+        public event EventHandler<ServerModifyEventArgs>? OnServerStarted;
+
+        public event EventHandler<ServerModifyEventArgs>? OnServerStopped;
 
         ////////////////////////////////////////////////////////////////
+        
+        private enum ClientState
+        {
+            HANDSHAKE, CONNECTED
+        }
 
-        private Dictionary<string, Thread> _ClientManagers = new Dictionary<string, Thread>();
-        private Dictionary<TcpClient, Thread> _AcceptorThreads = new Dictionary<TcpClient, Thread>();
+        private Dictionary<NSP2ServerClient, 
+            MutableKeyValuePair<Thread, ClientState>> _ClientManagers = new Dictionary<NSP2ServerClient, MutableKeyValuePair<Thread, ClientState>>();
 
         private Thread? _AcceptThread = null;
         private TcpListener? _Socket = null;
 
         private object _ClientManagerLock = new object();
-        private object _ClientListLock = new object();
         private object _AccountListLock = new object();
-        private object _AcceptThreadLock = new object();
 
         private byte[]? PasswordKey
         {
@@ -160,7 +197,7 @@ namespace NSP2.Server
             while (true)
             {
                 string id = "ID-" + NSP2Util.GenerateRandomString(8);
-                lock (_ClientListLock)
+                lock (_ClientManagerLock)
                 {
                     foreach (NSP2ServerClient cli in Clients)
                     {
@@ -192,13 +229,13 @@ namespace NSP2.Server
             Accounts = server.Accounts;
         }
 
-        private StatusResponseTemplate GenerateStatusResponse(bool viewClients)
+        private StatusResponseTemplate GenerateStatusResponse(bool viewClients, NSP2ServerClient? client=null)
         {
             List<NSP2ConnectedUser> users = new List<NSP2ConnectedUser>();
 
             if (viewClients)
             {
-                lock (_ClientListLock)
+                lock (_ClientManagerLock)
                 {
                     foreach (NSP2ServerClient cli in Clients)
                     {
@@ -216,9 +253,12 @@ namespace NSP2.Server
                 IsPasswordRequired = !string.IsNullOrEmpty(Password),
                 IsAddressProtected = UseAddressProtection,
                 IsCompressionRequired = UseCompression,
-                DefaultPermissions = this.DefaultPermissions,
+                DefaultPermissions = (client != null) ? client.Permissions : this.DefaultPermissions,
+                CurrentPermissions = this.DefaultPermissions,
                 Uptime = this.Uptime,
-                Clients = viewClients ? users : null
+                ConnectedClients = Clients.Count,
+                Clients = viewClients ? users : null,
+                KeepAliveInterval = this.KeepAliveInterval
             };
         }
 
@@ -233,7 +273,7 @@ namespace NSP2.Server
             { }
         }
 
-        private void SendIfNotNull(TcpClient sock, StatusMessage message, bool useServerSettings=true)
+        private void SendIfNotNull(TcpClient sock, StatusMessage message, string details="", bool useServerSettings=true)
         {
             byte[]? passwordKey = useServerSettings ? PasswordKey : null;
             bool compression = useServerSettings ? UseCompression : false;
@@ -241,24 +281,20 @@ namespace NSP2.Server
             SendIfNotNull(sock, NSP2Util.GeneratePacket(new NSP2Response()
             {
                 SentBy = null,
-                Result = message
+                Result = message,
+                Message = details
             }, passwordKey, compression, false));
         }
 
         private int[] GetClientIndex(string reference, UpdateType type)
         {
-            bool isID = false;
-
-            if (reference.Substring(0, 2).ToUpper().Equals("ID"))
-                isID = true;
-
             List<int> indexes = new List<int>();
 
             for (int i=0; i<Clients.Count; i++)
             {
                 if (type == UpdateType.ID_IP)
                 {
-                    if (isID)
+                    if (NSP2Util.IsID(reference))
                     {
                         if (Clients[i].ID.Equals(reference))
                             return new int[] { i };
@@ -285,25 +321,33 @@ namespace NSP2.Server
             return indexes.ToArray();
         }
 
-        private void HandleClientThread(string id)
+        private void HandleClientThread()
         {
             NSP2ServerClient? client = null;
+            ClientState? state = null;
+            DateTime handshakeExpire = DateTime.Now.AddSeconds(3000000); //30
+            DateTime handshakeNextStatus = DateTime.Now;
+            bool noResponse = true;
 
             while (true)
             {
                 client = null;
 
-                lock (_ClientListLock)
+                lock (_ClientManagerLock)
                 {
-                    foreach (NSP2ServerClient cli in Clients)
+                    foreach (KeyValuePair<NSP2ServerClient, MutableKeyValuePair<Thread, ClientState>> kvp in _ClientManagers)
                     {
-                        if (cli.ID.Equals(id))
+                        if (kvp.Value.Key.ManagedThreadId == Thread.CurrentThread.ManagedThreadId) 
                         {
-                            client = cli;
+                            client = kvp.Key;
+                            state = kvp.Value.Value;
                             break;
                         }
                     }
                 }
+
+                if (state == null)
+                    break;
 
                 if (client == null || !client.IsConnected)
                     break;
@@ -311,13 +355,24 @@ namespace NSP2.Server
                 if (client.IsBanned || client.IsKicked)
                     break;
 
+                if (state == ClientState.HANDSHAKE)
+                {
+                    if (noResponse && DateTime.Now >= handshakeNextStatus)
+                    {
+                        // Use no encryption since the client did not acknowledge.
+                        StatusResponseTemplate status = GenerateStatusResponse(DefaultPermissions.IsAdminOr(NSP2Permission.VIEW_CLIENTS));
+                        SendIfNotNull(client.Socket, StatusMessage.STATUS_EVENT, JsonConvert.SerializeObject(status), false);
+                        handshakeNextStatus = DateTime.Now.AddSeconds(10);
+                    }
+                }
+
                 bool loopBack;
                 byte[]? packetBytes = NSP2Util.ReceivePacketBytes(client.Socket, out loopBack, PasswordKey, UseCompression, TimeSpan.FromSeconds(5));
 
                 if (packetBytes == null)
                     continue;
 
-                if (loopBack)
+                if (loopBack && state == ClientState.CONNECTED)
                 {
                     // The message was the result of a relay from another client.
                     NSP2Response? res = JsonConvert.DeserializeObject<NSP2Response>(NSP2Util.ENCODING.GetString(packetBytes));
@@ -334,6 +389,116 @@ namespace NSP2.Server
                 if (req == null)
                     continue;
 
+                if (state == ClientState.HANDSHAKE)
+                {
+                    if (req.Type != RequestAction.AUTHENTICATE)
+                    {
+                        // No other operations are supported at this moment, except Authenticate.
+                        SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE, "Only AUTHENTICATE is supported at this stage.");
+                        continue;
+                    }
+
+                    if (MaxClients >= 0)
+                    {
+                        lock (_ClientManagerLock)
+                        {
+                            if (_ClientManagers.Count >= MaxClients)
+                            {
+                                SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE, "Maximum connections reached.");
+                                continue;
+                            }
+                        }
+                    }
+
+                    int ipCount = 0;
+
+                    EndPoint? ep = client.Socket.Client.RemoteEndPoint;
+                    if (ep == null)
+                        break;
+
+                    string ip = ((IPEndPoint)ep).Address.ToString();
+                    if (MaxConcurrent >= 0)
+                    {
+                        lock (_ClientManagerLock)
+                        {
+                            foreach (NSP2ServerClient cli in Clients)
+                            {
+                                if (cli.IP.Equals(ip))
+                                {
+                                    ipCount++;
+                                }
+                            }
+
+                            if (ipCount >= MaxConcurrent)
+                            {
+                                SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE, "Maximum concurrent connections reached.");
+                                continue;
+                            }
+                        }
+                    }
+
+                    noResponse = false;
+
+                    AuthTemplate? auth = JsonConvert.DeserializeObject<AuthTemplate>(req.Message);
+                    /********************************* ACKNOWLEDGEMENT SUCCESSFUL ************************/
+
+                    // Attempt to decode the message template. This is NOT required, but allows for additional permissions.
+                    if (auth != null && !string.IsNullOrEmpty(auth.AccountName) && !string.IsNullOrEmpty(auth.Token))
+                    {
+                        try
+                        {
+                            NSP2Account? reqAccount = null;
+                            lock (_AccountListLock)
+                            {
+                                foreach (NSP2Account acc in Accounts)
+                                {
+                                    if (auth.AccountName.Equals(acc.AccountName))
+                                    {
+                                        reqAccount = acc;
+                                        break;
+                                    }
+                                }
+                            }
+
+                            if (reqAccount == null || reqAccount.HashedPassword == null)
+                                throw new Exception();
+
+                            // Attempt to decode the token.
+                            byte[]? decryptBytes = NSP2Util.Decrypt(Convert.FromBase64String(auth.Token), reqAccount.HashedPassword);
+
+                            if (decryptBytes == null || decryptBytes.Length == 0 || !NSP2Util.ENCODING.GetString(decryptBytes).Equals("AUTH"))
+                                throw new Exception();
+
+                            // The account has been successfully authenticated.
+                            client.AccountName = reqAccount.AccountName;
+                            client.Permissions = reqAccount.Permissions;
+                        } catch (Exception)
+                        {
+                            SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE, "Authentication Failed.", true);
+                        }
+                    }
+
+                    byte[]? relayByte = NSP2Util.GeneratePacket(new NSP2Response()
+                    {
+                        Message = JsonConvert.SerializeObject(client.ToUser(UseAddressProtection)),
+                        Result = StatusMessage.CONNECTED_EVENT
+                    }, PasswordKey, UseCompression, true);
+
+                    lock (_ClientManagerLock)
+                    {
+                        _ClientManagers[client].Value = ClientState.CONNECTED;
+                        OnClientConnected?.Invoke(this, new ServerClientEventArgs(client, DateTime.Now));
+
+                        foreach (NSP2ServerClient cli in Clients)
+                        {
+                            if (cli.Equals(client))
+                                continue; // do not duplicate.
+                            SendIfNotNull(cli.Socket, relayByte);
+                        }
+                    }
+                    continue;
+                }
+
                 try
                 {
                     switch (req.Type)
@@ -347,6 +512,7 @@ namespace NSP2.Server
                                 // Create a NSP2Response to relay.
                                 byte[]? relayBytes = NSP2Util.GeneratePacket(new NSP2Response()
                                 {
+                                    Result = StatusMessage.MESSAGE_RECEIVE,
                                     Message = req.Message,
                                     SentBy = client.ToUser()
                                 }, PasswordKey, UseCompression, true);
@@ -354,7 +520,7 @@ namespace NSP2.Server
                                 if (relayBytes == null)
                                     break;
 
-                                lock (_ClientListLock)
+                                lock (_ClientManagerLock)
                                 {
                                     foreach (NSP2ServerClient cli in Clients)
                                     {
@@ -369,13 +535,8 @@ namespace NSP2.Server
                         case RequestAction.GET_STATUS:
                             {
                                 // Send a response.
-                                SendIfNotNull(client.Socket,
-                                        NSP2Util.GeneratePacket(GenerateStatusResponse(
-                                            client.Permissions.IsAdminOr(NSP2Permission.VIEW_CLIENTS)),
-                                            PasswordKey,
-                                            UseCompression,
-                                            false
-                                    ));
+                                StatusResponseTemplate status = GenerateStatusResponse(client.Permissions.IsAdminOr(NSP2Permission.VIEW_CLIENTS), client);
+                                SendIfNotNull(client.Socket, StatusMessage.STATUS_EVENT, JsonConvert.SerializeObject(status), true);
                                 break;
                             }
                         case RequestAction.UPDATE_PERMISSION:
@@ -383,7 +544,7 @@ namespace NSP2.Server
                                 // Only admins can use this feature.
                                 if (!client.Permissions.IsAdmin())
                                 {
-                                    SendIfNotNull(client.Socket, StatusMessage.NO_PERMISSION);
+                                    SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE);
                                 }
 
                                 // Check if message can decode to UpdatePermissionTemplate.
@@ -392,13 +553,13 @@ namespace NSP2.Server
                                 if (perm == null || NSP2Util.IsDefault<UpdatePermissionTemplate>(perm))
                                 {
                                     // Decoding failed. Return failure.
-                                    SendIfNotNull(client.Socket, StatusMessage.DECODE_FAIL);
+                                    SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE);
                                     break;
                                 }
 
                                 // Attempt to update permissions.
                                 bool success = false;
-                                lock (_ClientListLock)
+                                lock (_ClientManagerLock)
                                 {
                                     int[] cliIdx = GetClientIndex(perm.Reference, perm.Type);
                                     foreach (int idx in cliIdx)
@@ -419,7 +580,7 @@ namespace NSP2.Server
                                     }
                                 }
 
-                                SendIfNotNull(client.Socket, success ? StatusMessage.SUCCESS : StatusMessage.FAILURE);
+                                SendIfNotNull(client.Socket, success ? StatusMessage.OPERATION_SUCCESS : StatusMessage.OPERATION_FAILURE);
                                 break;
                             }
                         case RequestAction.KICK:
@@ -432,7 +593,7 @@ namespace NSP2.Server
                                     (req.Type == RequestAction.BAN && !client.Permissions.IsAdminOr(NSP2Permission.BAN)) ||
                                     (req.Type == RequestAction.MUTE && !client.Permissions.IsAdminOr(NSP2Permission.MUTE)))
                                 {
-                                    SendIfNotNull(client.Socket, StatusMessage.NO_PERMISSION);
+                                    SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE);
                                     break;
                                 }
 
@@ -440,12 +601,12 @@ namespace NSP2.Server
 
                                 if (user == null || NSP2Util.IsDefault<PunishTemplate>(user))
                                 {
-                                    SendIfNotNull(client.Socket, StatusMessage.DECODE_FAIL);
+                                    SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE);
                                     break;
                                 }
 
                                 bool success = false;
-                                lock (_ClientListLock)
+                                lock (_ClientManagerLock)
                                 {
                                     int[] cliIdx = GetClientIndex(user.Reference, user.Type);
                                     foreach (int idx in cliIdx)
@@ -484,7 +645,7 @@ namespace NSP2.Server
                                     }
                                 }
 
-                                SendIfNotNull(client.Socket, success ? StatusMessage.SUCCESS : StatusMessage.FAILURE);
+                                SendIfNotNull(client.Socket, success ? StatusMessage.OPERATION_SUCCESS : StatusMessage.OPERATION_FAILURE);
                                 break;
                             }
                         case RequestAction.UNBAN:
@@ -495,7 +656,7 @@ namespace NSP2.Server
                                     (req.Type == RequestAction.UNBAN && !client.Permissions.IsAdminOr(NSP2Permission.KICK)) ||
                                     (req.Type == RequestAction.UNMUTE && !client.Permissions.IsAdminOr(NSP2Permission.MUTE)))
                                 {
-                                    SendIfNotNull(client.Socket, StatusMessage.NO_PERMISSION);
+                                    SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE);
                                     break;
                                 }
 
@@ -503,12 +664,12 @@ namespace NSP2.Server
 
                                 if (user == null || NSP2Util.IsDefault<UserReferenceTemplate>(user))
                                 {
-                                    SendIfNotNull(client.Socket, StatusMessage.DECODE_FAIL);
+                                    SendIfNotNull(client.Socket, StatusMessage.OPERATION_FAILURE);
                                     break;
                                 }
 
                                 bool success = false;
-                                lock (_ClientListLock)
+                                lock (_ClientManagerLock)
                                 {
                                     int[] cliIdx = GetClientIndex(user.Reference, user.Type);
                                     foreach (int idx in cliIdx)
@@ -542,7 +703,7 @@ namespace NSP2.Server
                                         }
                                     }
 
-                                    SendIfNotNull(client.Socket, success ? StatusMessage.SUCCESS : StatusMessage.FAILURE);
+                                    SendIfNotNull(client.Socket, success ? StatusMessage.OPERATION_SUCCESS : StatusMessage.OPERATION_FAILURE);
                                     break;
                                 }
                             }
@@ -559,39 +720,46 @@ namespace NSP2.Server
 
             if (client != null)
             {
-                if (client.IsConnected)
+                if (state == ClientState.CONNECTED)
                 {
-                    if (client.IsBanned)
+                    if (client.IsConnected)
                     {
-                        SendIfNotNull(client.Socket, StatusMessage.BANNED);
-                        OnPunished?.Invoke(this, new PunishmentEventArgs(client, PunishmentType.BAN, DateTime.Now, client.PunishmentReason)); 
+                        if (client.IsBanned)
+                        {
+                            SendIfNotNull(client.Socket, StatusMessage.BANNED);
+                            OnPunished?.Invoke(this, new ServerPunishmentEventArgs(client, PunishmentType.BAN, DateTime.Now, client.PunishmentReason));
+                        } else if (client.IsKicked)
+                        {
+                            SendIfNotNull(client.Socket, StatusMessage.KICKED);
+                            OnPunished?.Invoke(this, new ServerPunishmentEventArgs(client, PunishmentType.KICK, DateTime.Now, client.PunishmentReason));
+                        } else if (client.IsMuted)
+                        {
+                            SendIfNotNull(client.Socket, StatusMessage.MUTED);
+                            OnPunished?.Invoke(this, new ServerPunishmentEventArgs(client, PunishmentType.MUTE, DateTime.Now, client.PunishmentReason));
+                        }
+
+                        client.Socket.Close();
                     }
-                        
-                    else if (client.IsKicked)
+
+                    byte[]? relayByte = NSP2Util.GeneratePacket(new NSP2Response()
                     {
-                        SendIfNotNull(client.Socket, StatusMessage.KICKED);
-                        OnPunished?.Invoke(this, new PunishmentEventArgs(client, PunishmentType.KICK, DateTime.Now, client.PunishmentReason));
+                        Message = JsonConvert.SerializeObject(client.ToUser(UseAddressProtection)),
+                        Result = StatusMessage.DISCONNECTED_EVENT
+                    }, PasswordKey, UseCompression, true);
+
+                    lock (_ClientManagerLock)
+                    {
+                        foreach (NSP2ServerClient cli in Clients)
+                        {
+                            SendIfNotNull(cli.Socket, relayByte);
+                        }
                     }
-                    else if (client.IsMuted)
-                    {
-                        SendIfNotNull(client.Socket, StatusMessage.MUTED);
-                        OnPunished?.Invoke(this, new PunishmentEventArgs(client, PunishmentType.MUTE, DateTime.Now, client.PunishmentReason));
-                    }                  
-
-                    client.Socket.Close();
+                    OnClientDisconnected?.Invoke(this, new ClientDisconnectEventArgs(client.ToUser(), DateTime.Now));
                 }
-
-                lock (_ClientListLock)
-                {
-                    Clients.Remove(client);
-                }
-
                 lock (_ClientManagerLock)
                 {
-                    _ClientManagers.Remove(client.ID);
+                    _ClientManagers.Remove(client);
                 }
-
-                OnClientDisconnected?.Invoke(this, new ClientDisconnectEventArgs(client.ToUser(), DateTime.Now));
             }   
         }
 
@@ -614,139 +782,101 @@ namespace NSP2.Server
             }
         }
 
-        /// <summary>
-        /// Offload the task of listening and accepting the client to a seperate Thread for increased performance.
-        /// </summary>
-        private void HandleAcceptClientThread()
+        public void Broadcast(byte[] resBytes)
         {
-            TcpClient? socket = null;
-            DateTime expire = DateTime.Now.AddMinutes(1);
-            DateTime nextSend = DateTime.Now; // periodically re-send the handshake data on the event of no response.
-            bool noResponse = true;
-
-            while (DateTime.Now <= expire)
+            lock (_ClientManagerLock)
             {
-                lock (_AcceptThreadLock)
+                foreach (NSP2ServerClient client in Clients)
                 {
-                    foreach (KeyValuePair<TcpClient, Thread> kvp in _AcceptorThreads)
+                    SendIfNotNull(client.Socket, resBytes);
+                }
+            }
+        }
+
+        public void Broadcast<T>(T res)
+        {
+            byte[]? resBytes = NSP2Util.GeneratePacket(res, PasswordKey, UseCompression);
+            if (resBytes == null)
+                return;
+            lock (_ClientManagerLock)
+            {
+                foreach (NSP2ServerClient client in Clients)
+                {
+                    SendIfNotNull(client.Socket, resBytes);
+                }
+            }
+        }
+
+        public NSP2ServerClient? GetClient(string idIP)
+        {
+            lock (_ClientManagerLock)
+            {
+                foreach (NSP2ServerClient client in Clients)
+                {
+                    if (NSP2Util.IsID(idIP))
                     {
-                        if (kvp.Value.ManagedThreadId == Thread.CurrentThread.ManagedThreadId)
+                        if (client.ID.Equals(idIP))
                         {
-                            socket = kvp.Key;
-                            break;
+                            return client;
+                        }
+                    }
+                    else
+                    {
+                        if (client.IP.Equals(idIP))
+                        {
+                            return client;
                         }
                     }
                 }
-                
-                if (socket == null || !socket.Connected)
-                    break;
-
-                if (noResponse && DateTime.Now >= nextSend)
-                {
-                    // Use no encryption since the client did not acknowledge.
-                    byte[]? packet = NSP2Util.GeneratePacket(GenerateStatusResponse(DefaultPermissions.IsAdminOr(NSP2Permission.VIEW_CLIENTS)));
-                    SendIfNotNull(socket, packet);
-                    nextSend = DateTime.Now.AddSeconds(10);
-                }
-
-                byte[]? packetBytes = NSP2Util.ReceivePacketBytes(socket, out _, PasswordKey, UseCompression, TimeSpan.FromSeconds(5));
-                if (packetBytes == null)
-                    continue;
-
-                NSP2Request? req = JsonConvert.DeserializeObject<NSP2Request>(NSP2Util.ENCODING.GetString(packetBytes));
-
-                if (req == null)
-                    continue;
-
-                if (req.Type == RequestAction.DISCONNECT)
-                    break; // disconnect
-
-                if (req.Type != RequestAction.AUTHENTICATE)
-                {
-                    // No other operations are supported at this moment, except Authenticate.
-                    SendIfNotNull(socket, StatusMessage.DECODE_FAIL, false);
-                    continue;
-                }
-
-                noResponse = false;
-
-                /********************************* ACKNOWLEDGEMENT SUCCESSFUL ************************/
-
-                NSP2ServerClient client = new NSP2ServerClient(socket, GetNextID(), DefaultPermissions);
-
-                // Attempt to decode the message template. This is NOT required, but allows for additional permissions.
-                AuthTemplate? auth = JsonConvert.DeserializeObject<AuthTemplate>(req.Message);
-
-                if (auth != null && !string.IsNullOrEmpty(auth.AccountName) && !string.IsNullOrEmpty(auth.Token))
-                {
-                    try
-                    {
-                        NSP2Account? reqAccount = null;
-                        lock (_AccountListLock)
-                        {
-                            foreach (NSP2Account acc in Accounts)
-                            {
-                                if (auth.AccountName.Equals(acc.AccountName))
-                                {
-                                    reqAccount = acc;
-                                    break;
-                                }
-                            }
-                        }
-
-                        if (reqAccount == null || reqAccount.HashedPassword == null)
-                            throw new Exception();
-
-                        // Attempt to decode the token.
-                        byte[]? decryptBytes = NSP2Util.Decrypt(Convert.FromBase64String(auth.Token), reqAccount.HashedPassword);
-
-                        if (decryptBytes == null || decryptBytes.Length == 0 || !NSP2Util.ENCODING.GetString(decryptBytes).Equals("AUTH"))
-                            throw new Exception();
-
-                        // The account has been successfully authenticated.
-                        client.AccountName = reqAccount.AccountName;
-                        client.Permissions = reqAccount.Permissions;
-                    }
-                    catch (Exception)
-                    {
-                        SendIfNotNull(socket, StatusMessage.HANDSHAKE_FAIL, true);
-                    }
-                }
-
-                // Send a success packet, then add the user.
-                SendIfNotNull(socket, StatusMessage.SUCCESS);
-
-                lock (_ClientListLock)
-                {
-                    Clients.Add(client);
-                }
-
-                lock (_ClientManagerLock)
-                {
-                    _ClientManagers.Add(client.ID, new Thread(() =>
-                    {
-                        HandleClientThread(client.ID);
-                    }));
-                    _ClientManagers[client.ID].Start();
-                    OnClientConnected?.Invoke(this, new ClientEventArgs(client, DateTime.Now));
-                    break; 
-                }
             }
+            return null;
+        }
 
-            lock (_AcceptThreadLock)
+        public bool SendMessage(NSP2ServerClient client, byte[] resBytes)
+        {
+            try
             {
-                TcpClient? key = null;
-                foreach (KeyValuePair<TcpClient, Thread> kvp in _AcceptorThreads)
-                {
-                    if (kvp.Value.ManagedThreadId.Equals(Thread.CurrentThread.ManagedThreadId))
-                    {
-                        key = kvp.Key;
-                        break;
-                    }
-                }
-                if (key != null)
-                    _AcceptorThreads.Remove(key);
+                if (!client.IsConnected)
+                    return false;
+                SendIfNotNull(client.Socket, resBytes);
+                return true;
+            } catch (Exception)
+            {
+                return false;
             }
+        }
+
+        public bool SendMessage<T>(NSP2ServerClient client, T res)
+        {
+            try
+            {
+                if (!client.IsConnected)
+                    return false;
+                byte[]? resBytes = NSP2Util.GeneratePacket(res, PasswordKey, UseCompression);
+                if (resBytes == null)
+                    return false;
+                SendIfNotNull(client.Socket, resBytes);
+                return true;
+            } catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        public bool SendMessage(string idIP, byte[] resBytes)
+        {
+            NSP2ServerClient? cli = GetClient(idIP);
+            if (cli == null)
+                return false;
+            return SendMessage(cli, resBytes);
+        }
+
+        public bool SendMessage<T>(string idIP, T res)
+        {
+            NSP2ServerClient? cli = GetClient(idIP);
+            if (cli == null)
+                return false;
+            return SendMessage(cli, res);
         }
 
         private void HandleListenClientThread()
@@ -760,13 +890,14 @@ namespace NSP2.Server
             _Socket = new TcpListener(IPObject, Port);
             _Socket.Start();
             IsRunning = true;
+            StartTime = DateTime.Now;
 
             while (IsRunning)
             {
                 TcpClient clientSocket;
                 try
                 {
-                    Task<TcpClient> task = TimeoutAfter(_Socket.AcceptTcpClientAsync(), TimeSpan.FromSeconds(5));
+                    Task<TcpClient> task = _Socket.AcceptTcpClientAsync().WaitAsync(TimeSpan.FromSeconds(5));
                     task.Wait();
 
                     if (task.Status != TaskStatus.RanToCompletion)
@@ -781,17 +912,20 @@ namespace NSP2.Server
                     continue;
                 }
 
-                lock (_AcceptThreadLock)
+                lock (_ClientManagerLock)
                 {
-                    string id = GetNextID();
-                    _AcceptorThreads.Add(clientSocket, new Thread(new ThreadStart(HandleAcceptClientThread)));
-                    _AcceptorThreads[clientSocket].Start();
+                    NSP2ServerClient cli = new NSP2ServerClient(clientSocket, GetNextID(), DefaultPermissions);
+                    Thread thread = new Thread(new ThreadStart(HandleClientThread));
+
+                    _ClientManagers.Add(cli, new MutableKeyValuePair<Thread, ClientState>(thread, ClientState.HANDSHAKE));
+                    _ClientManagers[cli].Key.Start();
                 }
             }
 
             _Socket.Stop();
             _Socket = null;
             IsRunning = false;
+            StartTime = new DateTime();
         }
 
         public void Start()
@@ -801,6 +935,30 @@ namespace NSP2.Server
                 _AcceptThread = new Thread(HandleListenClientThread);
                 _AcceptThread.Start();
                 IsRunning = true;
+                OnServerStarted?.Invoke(this, new ServerModifyEventArgs(this, DateTime.Now));
+            }
+        }
+
+        public void Stop()
+        {
+            if (IsRunning)
+            {
+                lock (_ClientManagerLock)
+                {
+                    foreach (NSP2ServerClient client in Clients)
+                    {
+                        client.Kick();
+                    }
+                }
+                DateTime expire = DateTime.Now + TimeSpan.FromSeconds(5);
+                IsRunning = false;
+
+                while (_Socket != null && DateTime.Now < expire)
+                {
+                    Thread.SpinWait(1);
+                }
+                _AcceptThread = null;
+                OnServerStopped?.Invoke(this, new ServerModifyEventArgs(this, DateTime.Now));
             }
         }
 
@@ -827,6 +985,19 @@ namespace NSP2.Server
                 Time = time;
                 Client = client;
                 Response = response;
+            }
+        }
+
+        public class ServerModifyEventArgs : EventArgs
+        {
+            public DateTime Time { get; }
+
+            public NSP2Server Server { get; }
+
+            public ServerModifyEventArgs(NSP2Server server, DateTime time)
+            {
+                Server = server;
+                Time = time;
             }
         }
     }

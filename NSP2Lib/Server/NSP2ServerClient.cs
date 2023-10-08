@@ -1,5 +1,7 @@
 ﻿using NSP2.Client;
 using NSP2.JSON;
+using NSP2.Util;
+using NSP2Lib.JSON;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -8,7 +10,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
-using static NSP2.Server.NSP2ServerClient.PunishmentEventArgs;
+using static NSP2.Server.NSP2ServerClient.ServerPunishmentEventArgs;
 
 namespace NSP2.Server
 {
@@ -34,9 +36,9 @@ namespace NSP2.Server
 
         public string PunishmentReason { private set; get; } = "";
 
-        public event EventHandler<PunishmentEventArgs>? OnPunish;
+        public event EventHandler<ServerPunishmentEventArgs>? OnPunish;
 
-        public event EventHandler<ClientEventArgs>? OnMuteRemoved;
+        public event EventHandler<ServerClientEventArgs>? OnMuteRemoved;
 
         public bool IsConnected
         {
@@ -58,6 +60,13 @@ namespace NSP2.Server
             };
         }
 
+        public bool Equals(NSP2ServerClient? obj)
+        {
+            if (obj == null)
+                return false;
+            return obj.ID.Equals(ID);
+        }
+
         public NSP2ServerClient(TcpClient socket, string id, NSP2PermissionList permissions)
         {
             Socket = socket;
@@ -74,20 +83,16 @@ namespace NSP2.Server
             { }
         }
 
-        public class PunishmentEventArgs : EventArgs
+        public class ServerPunishmentEventArgs : EventArgs
         {
-            public enum PunishmentType
-            {
-                KICK, BAN, MUTE
-            }
-
+            
             public PunishmentType Type { get; }
             public DateTime Time { get; }
             public NSP2ServerClient Client { get; }
 
             public string Reason { get; }
 
-            public PunishmentEventArgs(NSP2ServerClient client, PunishmentType type, DateTime time, string reason)
+            public ServerPunishmentEventArgs(NSP2ServerClient client, PunishmentType type, DateTime time, string reason)
             {
                 Time = time;
                 Type = type;
@@ -96,15 +101,27 @@ namespace NSP2.Server
             }
         }
 
-        public class ClientEventArgs : EventArgs
+        public class ServerClientEventArgs : EventArgs
         {
             public DateTime Time { get; }
             public NSP2ServerClient Client { get; }
 
-            public ClientEventArgs(NSP2ServerClient client,  DateTime time)
+            public ServerClientEventArgs(NSP2ServerClient client,  DateTime time)
             {
                 Time = time;
                 Client = client;
+            }
+        }
+
+        public class ServerSendMessageEventArgs : EventArgs
+        {
+            public NSP2ServerClient Client { get; }
+            public byte[] Bytes { get; }
+
+            public ServerSendMessageEventArgs(NSP2ServerClient client, byte[] bytes)
+            {
+                Client = client;
+                Bytes = bytes;
             }
         }
 
@@ -114,7 +131,7 @@ namespace NSP2.Server
             {
                 PunishmentReason = reason;
                 IsMuted = true;
-                OnPunish?.Invoke(this, new PunishmentEventArgs(this, PunishmentType.MUTE, DateTime.Now, reason));
+                OnPunish?.Invoke(this, new ServerPunishmentEventArgs(this, PunishmentType.MUTE, DateTime.Now, reason));
             }
         }
 
@@ -124,7 +141,7 @@ namespace NSP2.Server
             {
                 PunishmentReason = reason;
                 IsBanned = true;
-                OnPunish?.Invoke(this, new PunishmentEventArgs(this, PunishmentType.BAN, DateTime.Now, reason));
+                OnPunish?.Invoke(this, new ServerPunishmentEventArgs(this, PunishmentType.BAN, DateTime.Now, reason));
             }
         }
 
@@ -134,7 +151,7 @@ namespace NSP2.Server
             {
                 PunishmentReason = reason;
                 IsKicked = true;
-                OnPunish?.Invoke(this, new PunishmentEventArgs(this, PunishmentType.KICK, DateTime.Now, reason));
+                OnPunish?.Invoke(this, new ServerPunishmentEventArgs(this, PunishmentType.KICK, DateTime.Now, reason));
             }
         }
 
@@ -144,7 +161,7 @@ namespace NSP2.Server
             {
                 PunishmentReason = "";
                 IsMuted = false;
-                OnMuteRemoved?.Invoke(this, new ClientEventArgs(this, DateTime.Now));
+                OnMuteRemoved?.Invoke(this, new ServerClientEventArgs(this, DateTime.Now));
             }
         }
     }

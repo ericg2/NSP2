@@ -230,12 +230,12 @@ namespace NSP2.Util
             }         
         }
 
-        public static NSP2Request? ReceivePacket(TcpClient sock, out bool isLoopBack, byte[]? passHash=null, bool useCompression=true, TimeSpan? timeout=null)
+        public static T? ReceivePacket<T>(TcpClient sock, out bool isLoopBack, byte[]? passHash=null, bool useCompression=true, TimeSpan? timeout=null)
         {
             byte[]? packet = ReceivePacketBytes(sock, out isLoopBack, passHash, useCompression, timeout);
             if (packet == null)
                 return default;
-            return JsonConvert.DeserializeObject<NSP2Request>(ENCODING.GetString(packet));
+            return JsonConvert.DeserializeObject<T>(ENCODING.GetString(packet));
         }
 
         public static byte[]? ReceivePacketBytes(TcpClient sock, out bool isLoopBack, byte[]? passHash = null, bool useCompression = true, TimeSpan? timeout = null)
@@ -294,6 +294,7 @@ namespace NSP2.Util
             sock.ReceiveTimeout = oldTimeout;
             return req;
         }
+
 
         public static bool IsPacketLoopBack(byte[] packetBytes)
         {
@@ -386,6 +387,11 @@ namespace NSP2.Util
             return DecodePacket<T>(packetBytes, out _, passHash, useCompression);
         }
 
+        public static bool IsID(string reference)
+        {
+            return reference.Substring(0, 2).ToUpper().Equals("ID");
+        }
+
         /// <summary>
         /// Generates a packet from an object, with optional password-hash compression.
         /// </summary>
@@ -428,6 +434,7 @@ namespace NSP2.Util
                 if (isLoopBack)
                     objBytesList.AddRange(LOOPBACK_SUFFIX);
 
+                Console.WriteLine("Generated packet with length " + objBytesList.Count);
                 return objBytesList.ToArray();
             }
             catch (Exception)

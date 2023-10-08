@@ -1,4 +1,5 @@
-﻿using System;
+﻿using NSP2.Server;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
@@ -25,6 +26,18 @@ namespace NSP2.Client
             get
             {
                 return DateTime.Now - ConnectTime;
+            }
+        }
+
+        public class ClientUserEventArgs : EventArgs
+        {
+            public DateTime Time { get; }
+            public NSP2ConnectedUser? Client { get; }
+
+            public ClientUserEventArgs(NSP2ConnectedUser? client, DateTime time)
+            {
+                Time = time;
+                Client = client;
             }
         }
     }

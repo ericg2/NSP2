@@ -22,24 +22,30 @@ namespace NSP2.JSON
     public class NSP2Response
     {
 
-        public enum StatusMessage
+        public enum StatusMessage  : int
         {
-            DEFAULT,
-            NO_PERMISSION,
-            DECODE_FAIL,
-            SUCCESS,
-            FAILURE,
-            MESSAGE_RECEIVE,
-            KICKED,
-            BANNED,
-            MUTED,
-            UNMUTED,
-            DISCONNECTED,
-            CONNECTED,
-            HANDSHAKE_FAIL
+            DEFAULT = 0,
+
+            CONNECTED = 1,
+            MESSAGE_RECEIVE = 2,
+
+            OPERATION_SUCCESS = 3,
+            OPERATION_FAILURE = 4,
+
+            MUTED = 5,
+            KICKED = 6,
+            BANNED = 7,
+
+            UNMUTED = 8,
+
+            DISCONNECTED = 9,
+
+            DISCONNECTED_EVENT = 10,
+            CONNECTED_EVENT = 11,
+            STATUS_EVENT = 12
         }
 
-        public StatusMessage Result { set; get; } = StatusMessage.DEFAULT;
+        public StatusMessage Result { set; get; } = StatusMessage.MESSAGE_RECEIVE;
 
         public NSP2ConnectedUser? SentBy { set; get; } = null;
 

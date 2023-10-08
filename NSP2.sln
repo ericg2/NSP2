@@ -3,9 +3,11 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio Version 17
 VisualStudioVersion = 17.7.34031.279
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NSP2Lib", "NSP2Lib\NSP2Lib.csproj", "{CFB44805-6594-4F14-B1FB-1D416D07AB32}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NSP2Lib", "NSP2Lib\NSP2Lib.csproj", "{CFB44805-6594-4F14-B1FB-1D416D07AB32}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NSP2Test", "NSP2Test\NSP2Test.csproj", "{D4A5CB03-90C0-4E53-8311-FC94B31A42AA}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "NSP2Test", "NSP2Test\NSP2Test.csproj", "{D4A5CB03-90C0-4E53-8311-FC94B31A42AA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NSP2Example", "NSP2Example\NSP2Example.csproj", "{6DDE5B5D-FCF0-4597-BE2F-481B7F9D4598}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,6 +23,10 @@ Global
 		{D4A5CB03-90C0-4E53-8311-FC94B31A42AA}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D4A5CB03-90C0-4E53-8311-FC94B31A42AA}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D4A5CB03-90C0-4E53-8311-FC94B31A42AA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6DDE5B5D-FCF0-4597-BE2F-481B7F9D4598}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6DDE5B5D-FCF0-4597-BE2F-481B7F9D4598}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6DDE5B5D-FCF0-4597-BE2F-481B7F9D4598}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6DDE5B5D-FCF0-4597-BE2F-481B7F9D4598}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

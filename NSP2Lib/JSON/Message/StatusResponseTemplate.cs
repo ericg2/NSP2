@@ -18,6 +18,10 @@ namespace NSP2.JSON.Message
 
         public int MaxConcurrent { set; get; } = -1;
 
+        public int ConnectedClients { set; get; } = 0;
+
+        public TimeSpan KeepAliveInterval { set; get; }
+
         public List<NSP2ConnectedUser>? Clients { set; get; } = null;
 
         public bool IsPasswordRequired { set; get; } = false;
@@ -27,6 +31,8 @@ namespace NSP2.JSON.Message
         public bool IsCompressionRequired { set; get; } = false;
 
         public List<NSP2Permission> DefaultPermissions { set; get; } = new List<NSP2Permission>();
+
+        public List<NSP2Permission> CurrentPermissions { set; get; } = new List<NSP2Permission>();
 
         public TimeSpan Uptime { set; get; } = TimeSpan.Zero;
     }

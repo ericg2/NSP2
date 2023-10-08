@@ -45,25 +45,22 @@ namespace NSP2.JSON
 
         public string Message { set; get; } = "";
 
-        public static NSP2Request? ParseAuth(NSP2Account? account)
+        public static NSP2Request? ParseAuth(string? accountName, byte[]? hashedPassword)
         {
             NSP2Request req = new NSP2Request()
             {
                 Type = RequestAction.AUTHENTICATE
             };
 
-            if (account == null)
+            if (string.IsNullOrEmpty(accountName) || hashedPassword == null)
                 return req;
 
-            if (string.IsNullOrEmpty(account.AccountName) || account.HashedPassword == null)
-                return null;
-
-            byte[]? encBytes = NSP2Util.Encrypt(NSP2Util.ENCODING.GetBytes("AUTH"), account.HashedPassword);
+            byte[]? encBytes = NSP2Util.Encrypt(NSP2Util.ENCODING.GetBytes("AUTH"), hashedPassword);
             if (encBytes == null)
                 return null;
 
             AuthTemplate auth = new AuthTemplate();
-            auth.AccountName = account.AccountName;
+            auth.AccountName = accountName;
             auth.Token = Convert.ToBase64String(encBytes);
 
             req.Message = JsonConvert.SerializeObject(auth);
